@@ -1,4 +1,4 @@
-/node_modules
+node_modules/
 .env
 test_api_endpoints.js
 test_chat.js
