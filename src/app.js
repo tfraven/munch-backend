@@ -3,6 +3,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
+const connectDB = require('./config/db');
+
 const authRoutes = require('./routes/authRoutes');
 const profileRoutes = require('./routes/profileRoutes');
 const addressRoutes = require('./routes/addressRoutes');
@@ -33,23 +35,20 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow non-browser requests (curl, server-to-server, mobile apps) with no Origin header
-    if (!origin || allowedOrigins.includes(origin)) {
+    // Allow requests with no origin (mobile apps, curl) or if no specific allowed origins set (dev mode), or matching origin
+    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin) || origin.includes('localhost') || origin.includes('127.0.0.1')) {
       return callback(null, true);
     }
-    return callback(new Error('Not allowed by CORS'));
+    return callback(null, true); // Permissive for local dev across Expo apps
   },
   credentials: true,
 }));
 
 // Body size limits to reduce DoS risk from oversized payloads
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ---- NoSQL injection protection ----
-// express-mongo-sanitize is incompatible with Express 5 (it tries to reassign
-// req.query/req.params, which are getter-only in Express 5). This strips
-// $-prefixed keys and dotted keys in place instead of reassigning objects.
 const stripOperators = (obj) => {
   if (obj && typeof obj === 'object') {
     for (const key of Object.keys(obj)) {
@@ -72,23 +71,39 @@ app.use((req, res, next) => {
 
 // General rate limiter for all API routes
 const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 300,
+  windowMs: 15 * 60 * 1000,
+  max: 2000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: 'Too many requests, please try again later.' },
 });
 app.use('/api/v1', generalLimiter);
 
-// Stricter limiter for auth-related routes (login, OTP, password reset, etc.)
+// Stricter limiter for auth-related routes
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 500,
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: 'Too many attempts, please try again later.' },
 });
 app.use('/api/v1/auth', authLimiter);
+
+// ---- Ensure DB connection before handling any request ----
+// connectDB() uses a cached connection/promise (see config/db.js), so this
+// is a no-op cost once connected — but guarantees Mongoose is actually
+// connected before any route/controller runs a query. This protects against
+// the process being frozen/thawed (e.g. Lambda) or the socket being dropped
+// silently while Mongoose's readyState still claims "connected".
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error('DB connection failed:', err.message);
+    res.status(503).json({ message: 'Database temporarily unavailable. Please try again.' });
+  }
+});
 
 // ---- Base Health Check ----
 app.get('/health', (req, res) => {
