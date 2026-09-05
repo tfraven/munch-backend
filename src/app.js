@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const mongoSanitize = require('express-mongo-sanitize');
 
 const authRoutes = require('./routes/authRoutes');
 const profileRoutes = require('./routes/profileRoutes');
@@ -16,7 +15,6 @@ const orderRoutes = require('./routes/orderRoutes');
 const chatRoutes = require('./routes/chatRoutes');
 
 const app = express();
-app.use(mongoSanitize());
 
 // Trust reverse proxy (needed for correct req.ip behind nginx/load balancers,
 // which rate limiting relies on). Remove if not running behind a proxy.
@@ -47,6 +45,30 @@ app.use(cors({
 // Body size limits to reduce DoS risk from oversized payloads
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+
+// ---- NoSQL injection protection ----
+// express-mongo-sanitize is incompatible with Express 5 (it tries to reassign
+// req.query/req.params, which are getter-only in Express 5). This strips
+// $-prefixed keys and dotted keys in place instead of reassigning objects.
+const stripOperators = (obj) => {
+  if (obj && typeof obj === 'object') {
+    for (const key of Object.keys(obj)) {
+      if (key.startsWith('$') || key.includes('.')) {
+        delete obj[key];
+        continue;
+      }
+      if (typeof obj[key] === 'object') stripOperators(obj[key]);
+    }
+  }
+  return obj;
+};
+
+app.use((req, res, next) => {
+  stripOperators(req.body);
+  stripOperators(req.query);
+  stripOperators(req.params);
+  next();
+});
 
 // General rate limiter for all API routes
 const generalLimiter = rateLimit({
